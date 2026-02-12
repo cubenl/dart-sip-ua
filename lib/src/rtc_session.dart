@@ -121,6 +121,8 @@ class RTCSession extends EventManager implements Owner {
   bool _rtcReady = true;
 
   Timer? _iceDisconnectTimer;
+  Timer? _iceRestartTimer;
+  Timer? _iceRestartRetryTimer;
   bool _isAttemptingIceRestart = false;
 
   // SIP Timers.
@@ -1203,6 +1205,14 @@ class RTCSession extends EventManager implements Owner {
     });
 
     handlers.on(EventCallFailed(), (EventCallFailed event) {
+      // During ICE restart, the re-INVITE may fail (e.g. server rejects it
+      // after transport change) but ICE can still recover on its own.
+      // Don't terminate — let the ICE state handler decide.
+      if (_isAttemptingIceRestart) {
+        logger.w(
+            'ICE restart renegotiation failed, waiting for ICE recovery...');
+        return;
+      }
       terminate(<String, dynamic>{
         'cause': DartSIP_C.CausesType.WEBRTC_ERROR,
         'status_code': 500,
@@ -1568,6 +1578,8 @@ class RTCSession extends EventManager implements Owner {
     clearTimeout(_timers.userNoAnswerTimer);
 
     _iceDisconnectTimer?.cancel();
+    _iceRestartTimer?.cancel();
+    _iceRestartRetryTimer?.cancel();
 
     // Clear Session Timers.
     clearTimeout(_sessionTimers.timer);
@@ -1649,7 +1661,51 @@ class RTCSession extends EventManager implements Owner {
           'optional': <dynamic>[],
         };
     offerConstraints['mandatory']['IceRestart'] = true;
-    renegotiate(options: offerConstraints);
+
+    // Start a recovery timeout: if ICE doesn't recover within 15s, terminate.
+    _iceRestartTimer?.cancel();
+    _iceRestartTimer = Timer(const Duration(seconds: 15), () {
+      if (_isAttemptingIceRestart &&
+          _state != RtcSessionState.terminated &&
+          _state != RtcSessionState.canceled) {
+        logger.e('ICE restart recovery timeout (15s), terminating session.');
+        _isAttemptingIceRestart = false;
+        terminate(<String, dynamic>{
+          'cause': DartSIP_C.CausesType.RTP_TIMEOUT,
+          'status_code': 408,
+          'reason_phrase': 'ICE Connection Failed'
+        });
+      }
+    });
+
+    renegotiate(options: <String, dynamic>{
+      'rtcOfferConstraints': offerConstraints,
+      'mediaConstraints': <String, dynamic>{'audio': true, 'video': false},
+    });
+  }
+
+  /// Schedules a retry of _iceRestart() every 2 seconds until the SIP
+  /// transport is connected again. The 15s _iceRestartTimer is still running
+  /// as a safety net — if transport never comes back, it will terminate.
+  void _scheduleIceRestartRetry() {
+    _iceRestartRetryTimer?.cancel();
+    _iceRestartRetryTimer = Timer.periodic(const Duration(seconds: 2), (timer) {
+      if (_state == RtcSessionState.terminated ||
+          _state == RtcSessionState.canceled ||
+          !_isAttemptingIceRestart) {
+        timer.cancel();
+        _iceRestartRetryTimer = null;
+        return;
+      }
+      if (_ua.socketTransport?.isConnected() ?? false) {
+        logger.i('Transport reconnected, retrying ICE restart re-INVITE...');
+        timer.cancel();
+        _iceRestartRetryTimer = null;
+        _iceRestart();
+      } else {
+        logger.d('Transport still disconnected, waiting for reconnect...');
+      }
+    });
   }
 
   Future<void> _createRTCConnection(Map<String, dynamic> pcConfig,
@@ -1667,26 +1723,44 @@ class RTCSession extends EventManager implements Owner {
       if (state == RTCIceConnectionState.RTCIceConnectionStateFailed) {
         logger.e('ICE Connection State Failed.');
         _iceDisconnectTimer?.cancel();
-        terminate(<String, dynamic>{
-          'cause': DartSIP_C.CausesType.RTP_TIMEOUT,
-          'status_code': 408,
-          'reason_phrase': 'ICE Connection Failed'
-        });
+        _iceDisconnectTimer = null;
+        // If we haven't attempted an ICE restart yet, try once before terminating.
+        // The native ICE agent can transition Disconnected → Failed in ~10s,
+        // which may be faster than our disconnect timer.
+        if (!_isAttemptingIceRestart) {
+          if (!(_ua.socketTransport?.isConnected() ?? false)) {
+            logger.i('ICE Failed but transport not connected, skipping ICE restart.');
+          } else {
+            logger.i('Attempting ICE restart on Failed (first attempt)...');
+            _isAttemptingIceRestart = true;
+            _iceRestart();
+          }
+        } else {
+          // ICE restart is already in progress (from Disconnected timer).
+          // Don't terminate yet — the re-INVITE may still be pending, or ICE
+          // may recover on its own. The _iceRestartTimer will clean up if needed.
+          logger.w(
+              'ICE Failed during ongoing restart attempt, waiting for recovery...');
+        }
       } else if (state ==
           RTCIceConnectionState.RTCIceConnectionStateDisconnected) {
         logger.w('ICE Connection State Disconnected.');
         if (_iceDisconnectTimer == null && !_isAttemptingIceRestart) {
-          logger.i('Starting ICE disconnect timer...');
-          _iceDisconnectTimer = Timer(const Duration(seconds: 20), () {
+          logger.i('Starting ICE disconnect timer (5s)...');
+          _iceDisconnectTimer = Timer(const Duration(seconds: 5), () {
             logger.w('ICE disconnect timer fired!');
             if (_connection?.iceConnectionState ==
                     RTCIceConnectionState.RTCIceConnectionStateDisconnected &&
                 _state != RtcSessionState.terminated &&
                 _state != RtcSessionState.canceled &&
                 !_isAttemptingIceRestart) {
-              logger.i('Attempting ICE restart after timeout...');
-              _isAttemptingIceRestart = true;
-              _iceRestart();
+              if (!(_ua.socketTransport?.isConnected() ?? false)) {
+                logger.i('Transport not connected, skipping ICE restart (ICE may recover on its own).');
+              } else {
+                logger.i('Attempting ICE restart after timeout...');
+                _isAttemptingIceRestart = true;
+                _iceRestart();
+              }
             } else {
               logger.i('ICE restart aborted (state changed during timer).');
             }
@@ -1704,14 +1778,18 @@ class RTCSession extends EventManager implements Owner {
           logger.i(
               'ICE Connection State Connected/Completed. Canceling timer/resetting flag.');
           _iceDisconnectTimer?.cancel();
+          _iceRestartTimer?.cancel();
+          _iceRestartRetryTimer?.cancel();
           _isAttemptingIceRestart = false;
         } else {
           logger.i('ICE Connection State Connected/Completed.');
         }
       } else if (state == RTCIceConnectionState.RTCIceConnectionStateClosed) {
         // Connection closed locally, usually via _connection.close() called by terminate()
-        logger.i('ICE Connection State Closed.'); // Use logger.i
-        _iceDisconnectTimer?.cancel(); // Ensure timer is cancelled
+        logger.i('ICE Connection State Closed.');
+        _iceDisconnectTimer?.cancel();
+        _iceRestartTimer?.cancel();
+        _iceRestartRetryTimer?.cancel();
         // Ensure *SIP* session state reflects closure if not already set by terminate()
         if (_state != RtcSessionState.terminated &&
             _state != RtcSessionState.canceled) {
@@ -2790,13 +2868,28 @@ class RTCSession extends EventManager implements Owner {
         onFailed(event.response);
       });
       handlers.on(EventOnTransportError(), (EventOnTransportError event) {
-        onTransportError(); // Do nothing because session ends.
+        if (_isAttemptingIceRestart) {
+          // Transport is down during ICE restart re-INVITE. Don't terminate —
+          // schedule a retry when transport reconnects. The _iceRestartTimer
+          // (15s) is our safety net if transport never comes back.
+          logger.w(
+              'Transport error during ICE restart re-INVITE, will retry on transport reconnect.');
+          _scheduleIceRestartRetry();
+        } else {
+          onTransportError();
+        }
       });
       handlers.on(EventOnRequestTimeout(), (EventOnRequestTimeout event) {
-        onRequestTimeout(); // Do nothing because session ends.
+        if (_isAttemptingIceRestart) {
+          logger.w(
+              'Request timeout during ICE restart re-INVITE, will retry on transport reconnect.');
+          _scheduleIceRestartRetry();
+        } else {
+          onRequestTimeout();
+        }
       });
       handlers.on(EventOnDialogError(), (EventOnDialogError event) {
-        onDialogError(); // Do nothing because session ends.
+        onDialogError();
       });
 
       sendRequest(SipMethod.INVITE, <String, dynamic>{
