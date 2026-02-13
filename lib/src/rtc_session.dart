@@ -1087,6 +1087,19 @@ class RTCSession extends EventManager implements Owner {
       }
     });
     handlers.on(EventCallFailed(), (EventCallFailed event) {
+      // If ICE is still connected, the call works at the media level.
+      // Don't terminate — revert local hold state instead.
+      final iceState = _connection?.iceConnectionState;
+      if (iceState ==
+              RTCIceConnectionState.RTCIceConnectionStateConnected ||
+          iceState ==
+              RTCIceConnectionState.RTCIceConnectionStateCompleted) {
+        logger.w(
+            'Hold re-INVITE failed but ICE is still connected ($iceState), reverting hold state.');
+        _localHold = false;
+        _onunhold(Originator.local);
+        return;
+      }
       terminate(<String, dynamic>{
         'cause': DartSIP_C.CausesType.WEBRTC_ERROR,
         'status_code': 500,
@@ -1139,6 +1152,19 @@ class RTCSession extends EventManager implements Owner {
       }
     });
     handlers.on(EventCallFailed(), (EventCallFailed event) {
+      // If ICE is still connected, the call works at the media level.
+      // Don't terminate — revert local unhold state instead.
+      final iceState = _connection?.iceConnectionState;
+      if (iceState ==
+              RTCIceConnectionState.RTCIceConnectionStateConnected ||
+          iceState ==
+              RTCIceConnectionState.RTCIceConnectionStateCompleted) {
+        logger.w(
+            'Unhold re-INVITE failed but ICE is still connected ($iceState), reverting unhold state.');
+        _localHold = true;
+        _onhold(Originator.local);
+        return;
+      }
       terminate(<String, dynamic>{
         'cause': DartSIP_C.CausesType.WEBRTC_ERROR,
         'status_code': 500,
