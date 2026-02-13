@@ -1482,6 +1482,14 @@ class RTCSession extends EventManager implements Owner {
   void onTransportError() {
     logger.e('onTransportError()');
     if (_state != RtcSessionState.terminated) {
+      // During an active call, don't terminate on transport error.
+      // ICE/WebRTC media continues independently of SIP signaling.
+      // The ICE disconnect timer (10s) and safety timeout (15s)
+      // handle actual call termination if media also fails.
+      if (_state == RtcSessionState.confirmed) {
+        logger.w('onTransportError() during active call — not terminating (ICE continues independently)');
+        return;
+      }
       terminate(<String, dynamic>{
         'status_code': 500,
         'reason_phrase': DartSIP_C.CausesType.CONNECTION_ERROR,
