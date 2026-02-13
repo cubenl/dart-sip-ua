@@ -1213,6 +1213,18 @@ class RTCSession extends EventManager implements Owner {
             'ICE restart renegotiation failed, waiting for ICE recovery...');
         return;
       }
+      // Race condition guard: ICE may have recovered (Connected/Completed)
+      // before the server response arrived, which resets _isAttemptingIceRestart.
+      // If ICE is already connected, the call is fine — don't terminate.
+      final iceState = _connection?.iceConnectionState;
+      if (iceState ==
+              RTCIceConnectionState.RTCIceConnectionStateConnected ||
+          iceState ==
+              RTCIceConnectionState.RTCIceConnectionStateCompleted) {
+        logger.w(
+            'Renegotiation failed but ICE is already connected ($iceState), ignoring.');
+        return;
+      }
       terminate(<String, dynamic>{
         'cause': DartSIP_C.CausesType.WEBRTC_ERROR,
         'status_code': 500,
