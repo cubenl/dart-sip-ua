@@ -143,6 +143,18 @@ class SocketTransport {
     );
   }
 
+  /// Force-disconnects the current socket without setting [_close_requested],
+  /// so the built-in auto-reconnect mechanism will reconnect automatically.
+  /// Use this when the network interface changes (e.g. WiFi → cellular) and
+  /// the existing socket is stuck on the old interface.
+  void forceDisconnect() {
+    logger.d('Transport forceDisconnect()');
+    _recover_attempts = 0;
+    // Close the raw socket. The onclose callback fires _onDisconnect which,
+    // because _close_requested is false, calls _reconnect() automatically.
+    socket.disconnect();
+  }
+
   bool send(dynamic data) {
     logger.d('Socket Transport send()');
 

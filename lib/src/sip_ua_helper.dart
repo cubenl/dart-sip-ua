@@ -78,6 +78,15 @@ class SIPUAHelper extends EventManager {
     }
   }
 
+  /// Force-disconnects the SIP WebSocket transport without tearing down the
+  /// SIP session or sending UNREGISTER. The built-in auto-reconnect mechanism
+  /// will reconnect on the new network interface. Active SIP dialogs survive.
+  void disconnectTransport() {
+    if (_ua?.socketTransport != null) {
+      _ua!.socketTransport!.forceDisconnect();
+    }
+  }
+
   void register() {
     assert(_ua != null,
         'register called but not started, you must call start first.');
