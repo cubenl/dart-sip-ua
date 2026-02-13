@@ -627,6 +627,11 @@ class Call {
     _session.renegotiate(options: options, useUpdate: useUpdate, done: done);
   }
 
+  void requestIceRestart() {
+    assert(_session != null, 'ERROR(requestIceRestart): rtc session is invalid!');
+    _session.iceRestart();
+  }
+
   void sendDTMF(String tones, [Map<String, dynamic>? options]) {
     assert(_session != null, 'ERROR(sendDTMF): rtc session is invalid!');
     _session.sendDTMF(tones, options);

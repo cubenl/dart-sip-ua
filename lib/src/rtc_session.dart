@@ -1674,7 +1674,10 @@ class RTCSession extends EventManager implements Owner {
     }, Timers.TIMER_H);
   }
 
-  void _iceRestart() async {
+  /// Triggers an ICE restart by sending a re-INVITE with IceRestart=true.
+  /// Can be called externally (e.g., on network type change) or internally
+  /// (after ICE disconnect timer fires).
+  void iceRestart() async {
     Map<String, dynamic> offerConstraints = _rtcOfferConstraints ??
         <String, dynamic>{
           'mandatory': <String, dynamic>{},
@@ -1704,7 +1707,7 @@ class RTCSession extends EventManager implements Owner {
     });
   }
 
-  /// Schedules a retry of _iceRestart() every 2 seconds until the SIP
+  /// Schedules a retry of iceRestart() every 2 seconds until the SIP
   /// transport is connected again. The 15s _iceRestartTimer is still running
   /// as a safety net — if transport never comes back, it will terminate.
   void _scheduleIceRestartRetry() {
@@ -1721,7 +1724,7 @@ class RTCSession extends EventManager implements Owner {
         logger.i('Transport reconnected, retrying ICE restart re-INVITE...');
         timer.cancel();
         _iceRestartRetryTimer = null;
-        _iceRestart();
+        iceRestart();
       } else {
         logger.d('Transport still disconnected, waiting for reconnect...');
       }
@@ -1753,7 +1756,7 @@ class RTCSession extends EventManager implements Owner {
           } else {
             logger.i('Attempting ICE restart on Failed (first attempt)...');
             _isAttemptingIceRestart = true;
-            _iceRestart();
+            iceRestart();
           }
         } else {
           // ICE restart is already in progress (from Disconnected timer).
@@ -1779,7 +1782,7 @@ class RTCSession extends EventManager implements Owner {
               } else {
                 logger.i('Attempting ICE restart after timeout...');
                 _isAttemptingIceRestart = true;
-                _iceRestart();
+                iceRestart();
               }
             } else {
               logger.i('ICE restart aborted (state changed during timer).');

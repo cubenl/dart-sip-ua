@@ -1,7 +1,7 @@
 # dart-sip-ua
 
 [![Financial Contributors on Open Collective](https://opencollective.com/flutter-webrtc/all/badge.svg?label=financial+contributors)](https://opencollective.com/flutter-webrtc) [![pub package](https://img.shields.io/pub/v/sip_ua.svg)](https://pub.dev/packages/sip_ua)  [![slack](https://img.shields.io/badge/join-us%20on%20slack-gray.svg?longCache=true&logo=slack&colorB=brightgreen)](https://join.slack.com/t/flutterwebrtc/shared_invite/zt-q83o7y1s-FExGLWEvtkPKM8ku_F8cEQ)
- 
+
 A dart-lang version of the SIP UA stack, ported from [JsSIP](https://github.com/versatica/JsSIP).
 
 ## Overview
@@ -90,6 +90,42 @@ The codecs on your PBX server don't match the codecs used by WebRTC
 
 </details>
 
+## CubeNL Fork Changes (`cubenl/dart-sip-ua`)
+
+Adds **ICE disconnect recovery** to `lib/src/rtc_session.dart`. Upstream has no recovery — a network drop kills the call silently.
+
+### Changes
+
+- **ICE Disconnected** → 5s timer → `_iceRestart()` (re-INVITE with `IceRestart: true`)
+- **ICE Failed** → attempt restart if not already in progress
+- **15s safety timer** → terminate if ICE never recovers
+- **Transport check before `_iceRestart()`** — skip if SIP WebSocket is down (see below)
+- **`_scheduleIceRestartRetry()`** — retry re-INVITE every 2s when transport reconnects
+- **TransportError/RequestTimeout during restart** → retry instead of terminating
+
+### Transport Check (Core Fix)
+
+```dart
+if (!(_ua.socketTransport?.isConnected() ?? false)) {
+  logger.i('Transport not connected, skipping ICE restart.');
+} else {
+  _iceRestart();
+}
+```
+
+Without this: `_iceRestart()` → `createLocalDescription` generates new ICE `ufrag`/`pwd` → re-INVITE can't be sent (transport down) → ICE recovers on old candidate pairs → credential mismatch → outgoing audio breaks.
+
+With this: ICE recovers on its own with consistent credentials. App-level 30s timer handles the case where ICE never recovers.
+
+### Timers
+
+| Timer | Duration | Purpose |
+| --- | --- | --- |
+| `_iceDisconnectTimer` | 5s | Wait before ICE restart attempt |
+| `_iceRestartTimer` | 15s | Safety net → terminate if no recovery |
+| `_iceRestartRetryTimer` | 2s periodic | Retry re-INVITE when transport reconnects |
+
+---
 
 ## NOTE
 Thanks to the original authors of [JsSIP](https://github.com/versatica/JsSIP) for providing the JS version, which makes it possible to port the [dart-lang](https://dart.dev).
