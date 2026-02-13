@@ -1758,8 +1758,8 @@ class RTCSession extends EventManager implements Owner {
           RTCIceConnectionState.RTCIceConnectionStateDisconnected) {
         logger.w('ICE Connection State Disconnected.');
         if (_iceDisconnectTimer == null && !_isAttemptingIceRestart) {
-          logger.i('Starting ICE disconnect timer (5s)...');
-          _iceDisconnectTimer = Timer(const Duration(seconds: 5), () {
+          logger.i('Starting ICE disconnect timer (10s)...');
+          _iceDisconnectTimer = Timer(const Duration(seconds: 10), () {
             logger.w('ICE disconnect timer fired!');
             if (_connection?.iceConnectionState ==
                     RTCIceConnectionState.RTCIceConnectionStateDisconnected &&
