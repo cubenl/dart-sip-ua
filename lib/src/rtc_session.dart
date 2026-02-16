@@ -1734,8 +1734,10 @@ class RTCSession extends EventManager implements Owner {
   }
 
   /// Schedules a retry of iceRestart() every 2 seconds until the SIP
-  /// transport is connected again. The 15s _iceRestartTimer is still running
-  /// as a safety net — if transport never comes back, it will terminate.
+  /// transport is connected again. The 15s _iceRestartTimer must be started
+  /// by the caller as a safety net — if transport never comes back, it
+  /// terminates the session. When iceRestart() is eventually called, it
+  /// resets the timer to give another 15s for the actual re-INVITE.
   void _scheduleIceRestartRetry() {
     _iceRestartRetryTimer?.cancel();
     _iceRestartRetryTimer = Timer.periodic(const Duration(seconds: 2), (timer) {
@@ -1777,13 +1779,36 @@ class RTCSession extends EventManager implements Owner {
         // The native ICE agent can transition Disconnected → Failed in ~10s,
         // which may be faster than our disconnect timer.
         if (!_isAttemptingIceRestart) {
-          if (!(_ua.socketTransport?.isConnected() ?? false)) {
-            logger.i('ICE Failed but transport not connected, skipping ICE restart.');
+          _isAttemptingIceRestart = true;
+
+          // Start the safety timer: if ICE doesn't recover within 15s
+          // (including transport reconnect time), terminate the session.
+          // When _scheduleIceRestartRetry() eventually calls iceRestart(),
+          // the timer is reset to give another 15s for the actual re-INVITE.
+          _iceRestartTimer?.cancel();
+          _iceRestartTimer = Timer(const Duration(seconds: 15), () {
+            if (_isAttemptingIceRestart &&
+                _state != RtcSessionState.terminated &&
+                _state != RtcSessionState.canceled) {
+              logger.e('ICE restart recovery timeout (15s), terminating session.');
+              _isAttemptingIceRestart = false;
+              terminate(<String, dynamic>{
+                'cause': DartSIP_C.CausesType.RTP_TIMEOUT,
+                'status_code': 408,
+                'reason_phrase': 'ICE Connection Failed'
+              });
+            }
+          });
+
+          // Zombie prevention: force-disconnect the transport first,
+          // then retry on a clean connection.
+          if (_ua.socketTransport?.isConnected() ?? false) {
+            logger.i('ICE Failed, force-disconnecting transport (zombie prevention)...');
+            _ua.socketTransport!.forceDisconnect();
           } else {
-            logger.i('Attempting ICE restart on Failed (first attempt)...');
-            _isAttemptingIceRestart = true;
-            iceRestart();
+            logger.i('ICE Failed, transport already disconnected, waiting for reconnect...');
           }
+          _scheduleIceRestartRetry();
         } else {
           // ICE restart is already in progress (from Disconnected timer).
           // Don't terminate yet — the re-INVITE may still be pending, or ICE
@@ -1803,13 +1828,49 @@ class RTCSession extends EventManager implements Owner {
                 _state != RtcSessionState.terminated &&
                 _state != RtcSessionState.canceled &&
                 !_isAttemptingIceRestart) {
-              if (!(_ua.socketTransport?.isConnected() ?? false)) {
-                logger.i('Transport not connected, skipping ICE restart (ICE may recover on its own).');
+              _isAttemptingIceRestart = true;
+
+              // Start the safety timer: if ICE doesn't recover within 15s
+              // (including transport reconnect time), terminate the session.
+              // When _scheduleIceRestartRetry() eventually calls iceRestart(),
+              // the timer is reset to give another 15s for the actual re-INVITE.
+              _iceRestartTimer?.cancel();
+              _iceRestartTimer = Timer(const Duration(seconds: 15), () {
+                if (_isAttemptingIceRestart &&
+                    _state != RtcSessionState.terminated &&
+                    _state != RtcSessionState.canceled) {
+                  logger.e('ICE restart recovery timeout (15s), terminating session.');
+                  _isAttemptingIceRestart = false;
+                  terminate(<String, dynamic>{
+                    'cause': DartSIP_C.CausesType.RTP_TIMEOUT,
+                    'status_code': 408,
+                    'reason_phrase': 'ICE Connection Failed'
+                  });
+                }
+              });
+
+              // After 10s of ICE disconnect, the SIP WebSocket might be a
+              // "zombie" — TCP hasn't detected the network loss, so
+              // isConnected() returns true even though the socket is dead.
+              // Sending a re-INVITE through a zombie corrupts the SIP dialog
+              // (server processes it, but when the zombie finally dies and we
+              // reconnect, the dialog state is inconsistent → 500 Dialog Error).
+              //
+              // Fix: always force-disconnect the transport first. This is safe
+              // because after 10s of broken media, any WebSocket state is
+              // suspect. The auto-reconnect creates a clean socket, and the
+              // retry timer sends the re-INVITE through it.
+              //
+              // Cost for non-zombie case (e.g. WiFi→cellular where WebSocket
+              // already migrated): ~2s reconnect delay, negligible after 10s
+              // of broken audio.
+              if (_ua.socketTransport?.isConnected() ?? false) {
+                logger.i('Force-disconnecting transport (zombie prevention) before ICE restart...');
+                _ua.socketTransport!.forceDisconnect();
               } else {
-                logger.i('Attempting ICE restart after timeout...');
-                _isAttemptingIceRestart = true;
-                iceRestart();
+                logger.i('Transport already disconnected, waiting for reconnect...');
               }
+              _scheduleIceRestartRetry();
             } else {
               logger.i('ICE restart aborted (state changed during timer).');
             }
