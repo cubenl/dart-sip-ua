@@ -637,7 +637,8 @@ class Call {
   }
 
   void requestIceRestart() {
-    assert(_session != null, 'ERROR(requestIceRestart): rtc session is invalid!');
+    assert(
+        _session != null, 'ERROR(requestIceRestart): rtc session is invalid!');
     _session.iceRestart();
   }
 
